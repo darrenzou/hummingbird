@@ -1,0 +1,4 @@
+--- a/arb_ipc.h
++++ b/arb_ipc.h
+@@ enum
++    MSG_POLY_PRICE_UPDATE  = 7,

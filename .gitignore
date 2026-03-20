@@ -1,0 +1,26 @@
+# Environment / secrets
+.env
+*.pem
+
+# Compiled binaries
+kalshi_test
+poly_test
+main
+
+# Object files
+*.o
+*.a
+
+# Build artifacts
+*.out
+*.dSYM/
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
