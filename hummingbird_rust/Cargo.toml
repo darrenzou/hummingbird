@@ -2,16 +2,28 @@
 name = "hummingbird_rust"
 version = "0.1.0"
 edition = "2021"
+default-run = "hummingbird_rust"
 
 [lib]
 name = "hummingbird_rust"
 path = "src/lib.rs"
 
+[[bin]]
+name = "setup_connectivity_test"
+path = "setup_test/main.rs"
+
+[[bin]]
+name = "setup_db_write"
+path = "setup_test/db_write.rs"
+
 [dependencies]
 anyhow = "1"
+ctrlc = "3.4"
 base64 = "0.22"
 bincode = "1"
 dotenvy = "0.15"
+ethabi = "18"
+ethereum-types = { version = "0.14", features = ["rlp"] }
 hex = "0.4"
 hmac = "0.12"
 k256 = { version = "0.13", features = ["ecdsa"] }
@@ -19,6 +31,7 @@ libc = "0.2"
 native-tls = "0.2"
 num-bigint = "0.4"
 rand = "0.8"
+rlp = "0.5"
 rsa = { version = "0.9", features = ["sha2", "pem"] }
 mysql = { version = "27", features = ["native-tls"] }
 postgres = "0.19"

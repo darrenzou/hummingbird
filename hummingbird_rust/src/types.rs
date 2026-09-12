@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 pub const ARB_MAX_LEVELS: usize = 64;
 pub const ARB_MAX_TRACKED: usize = 32;
-pub const IPC_VERSION: u8 = 1;
+pub const IPC_VERSION: u8 = 2;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Side {
@@ -22,26 +22,29 @@ pub struct PriceLevel {
     pub size: f64,
 }
 
+/// Taker-venue order book (always in **US dollar** prices per outcome share, 0–1).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct PolyFullBookPayload {
+pub struct TakerFullBookPayload {
     pub bids: Vec<PriceLevel>,
     pub asks: Vec<PriceLevel>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PolyLevelVolUpdatePayload {
+pub struct TakerLevelVolUpdatePayload {
     pub side: Side,
     pub levels: Vec<(i16, f64)>,
+    #[serde(default, alias = "poly_book")]
+    pub taker_book: Option<TakerFullBookPayload>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct KalshiLevelsDonePayload {
+pub struct MakerLevelsDonePayload {
     pub bid_levels: Vec<(i16, f64)>,
     pub ask_levels: Vec<(i16, f64)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct KalshiBookSnapshot {
+pub struct MakerBookSnapshot {
     pub version: u8,
     pub market: String,
     pub ts: u64,
@@ -50,7 +53,7 @@ pub struct KalshiBookSnapshot {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct KalshiBookDelta {
+pub struct MakerBookDelta {
     pub version: u8,
     pub ts: u64,
     pub changes: Vec<BookChange>,
@@ -64,7 +67,7 @@ pub struct BookChange {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct KalshiFillPayload {
+pub struct MakerFillPayload {
     pub ts: u64,
     pub order_id: String,
     pub side: Side,
@@ -99,8 +102,8 @@ pub struct CascadeOrder {
     pub side: Side,
     pub limit_price_cents: i16,
     pub qty: u32,
-    /// Poly-side liquidity proxy at this level (for resize ratio).
-    pub initial_poly_vol: f64,
+    pub initial_taker_vol: f64,
+    pub initial_maker_vol: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -109,6 +112,8 @@ pub struct CascadeOrders {
     pub ts: u64,
     pub market: String,
     pub orders: Vec<CascadeOrder>,
+    #[serde(default, alias = "poly_book")]
+    pub taker_book: Option<TakerFullBookPayload>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -133,17 +138,42 @@ pub struct LevelUpdate {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MakerTouchChanged {
+    pub version: u8,
+    pub ts: u64,
+    pub side: Side,
+    pub new_k_cents: i16,
+    pub new_k_qty: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TouchCascadePivot {
+    pub version: u8,
+    pub ts: u64,
+    pub market: String,
+    pub side: Side,
+    pub drop_level_price_cents: i16,
+    pub new_order: CascadeOrder,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ArbMsg {
-    KalshiBookSnapshot(KalshiBookSnapshot),
-    KalshiBookDelta(KalshiBookDelta),
+    MakerBookSnapshot(MakerBookSnapshot),
+    MakerBookDelta(MakerBookDelta),
     CascadeOrders(CascadeOrders),
     LevelUpdate(LevelUpdate),
-    KalshiLevelsDone(KalshiLevelsDonePayload),
-    KalshiFill(KalshiFillPayload),
+    MakerLevelsDone(MakerLevelsDonePayload),
+    MakerFill(MakerFillPayload),
+    MakerTouchChanged(MakerTouchChanged),
+    TouchCascadePivot(TouchCascadePivot),
     ErrorEvent(ErrorEventPayload),
     AbortFatal(AbortFatalPayload),
-    PolyFullBook(PolyFullBookPayload),
-    PolyLevelVolUpdate(PolyLevelVolUpdatePayload),
+    TakerFullBook(TakerFullBookPayload),
+    TakerLevelVolUpdate(TakerLevelVolUpdatePayload),
     Abort { reason: String },
-    KalshiAbort { reason: String },
+    MakerAbort { reason: String },
 }
+
+// Legacy names used in a few modules during migration.
+pub type PolyFullBookPayload = TakerFullBookPayload;
+pub type PolyLevelVolUpdatePayload = TakerLevelVolUpdatePayload;

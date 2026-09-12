@@ -3,7 +3,9 @@ use std::env;
 use std::os::unix::io::RawFd;
 
 fn main() -> anyhow::Result<()> {
-    let config_path = env::args().nth(1).unwrap_or_else(|| "config.json".to_string());
+    let config_path = env::args()
+        .nth(1)
+        .unwrap_or_else(|| "config.json".to_string());
 
     // Load .env first (like hummingbirdv2), then config.json.
     hummingbird_rust::arb_config::load_dotenv(".env");
@@ -36,6 +38,13 @@ fn main() -> anyhow::Result<()> {
         }
     }
     env::set_var("ARB_NEG_RISK", if pair0.neg_risk { "1" } else { "0" });
+    env::set_var(
+        "ARB_MAKER",
+        match pair0.maker {
+            hummingbird_rust::arb_config::MakerVenue::Kalshi => "kalshi",
+            hummingbird_rust::arb_config::MakerVenue::Polymarket => "polymarket",
+        },
+    );
 
     if let Some(db_path) = &cfg.db_path {
         if !db_path.is_empty() {
@@ -68,6 +77,11 @@ fn main() -> anyhow::Result<()> {
     let (kalshi_to_poly_r, kalshi_to_poly_w) = hummingbird_rust::arb_ipc::pipe_pair()?;
 
     unsafe {
+        // Let children handle Ctrl+C (cancel Kalshi orders, Poly sends Abort). Parent ignores so it
+        // stays alive until both children exit.
+        #[cfg(unix)]
+        libc::signal(libc::SIGINT, libc::SIG_IGN);
+
         let poly_pid = libc::fork();
         if poly_pid < 0 {
             anyhow::bail!("fork poly failed");
@@ -78,7 +92,10 @@ fn main() -> anyhow::Result<()> {
             hummingbird_rust::arb_ipc::close_fd(kalshi_to_poly_w);
             let fd_out: RawFd = poly_to_kalshi_w;
             let fd_in: RawFd = kalshi_to_poly_r;
-            let _ = hummingbird_rust::arb_poly::poly_process_run(fd_in, fd_out);
+            match hummingbird_rust::arb_poly::poly_process_run(fd_in, fd_out) {
+                Ok(()) => {}
+                Err(e) => eprintln!("[poly-child] process exited with error: {e:#}"),
+            }
             hummingbird_rust::arb_ipc::close_fd(fd_out);
             hummingbird_rust::arb_ipc::close_fd(fd_in);
             libc::_exit(0);
@@ -94,7 +111,10 @@ fn main() -> anyhow::Result<()> {
             hummingbird_rust::arb_ipc::close_fd(kalshi_to_poly_r);
             let fd_in: RawFd = poly_to_kalshi_r;
             let fd_out: RawFd = kalshi_to_poly_w;
-            let _ = hummingbird_rust::arb_kalshi::kalshi_process_run(fd_in, fd_out);
+            match hummingbird_rust::arb_kalshi::kalshi_process_run(fd_in, fd_out) {
+                Ok(()) => {}
+                Err(e) => eprintln!("[kalshi-child] process exited with error: {e:#}"),
+            }
             hummingbird_rust::arb_ipc::close_fd(fd_out);
             hummingbird_rust::arb_ipc::close_fd(fd_in);
             libc::_exit(0);
@@ -114,4 +134,3 @@ fn main() -> anyhow::Result<()> {
 
     Ok(())
 }
-

@@ -1,17 +1,23 @@
 # Environment / secrets
 .env
+.env.*
 *.pem
 
-# Compiled binaries
-kalshi_test
-poly_test
-main
+# Rust
+hummingbird_rust/target/
+**/target/
 
-# Object files
+# Node (optional Polymarket builder tooling, not required to read the crate)
+hummingbird_rust/node_modules/
+
+# Local databases / runtime
+*.db
+*.sqlite
+*.sqlite3
+
+# Object files / binaries
 *.o
 *.a
-
-# Build artifacts
 *.out
 *.dSYM/
 

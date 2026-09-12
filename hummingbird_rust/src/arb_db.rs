@@ -2,10 +2,42 @@ use anyhow::Context;
 use mysql::prelude::*;
 use mysql::{Opts, OptsBuilder, Pool, PooledConn, SslOpts};
 use postgres::Client;
+use std::collections::HashMap;
 use std::path::Path;
 
 use crate::arb_config::{now_ms, ArbCreds};
 use crate::types::PriceLevel;
+
+/// Resting **maker** venue LIMIT sizes (contracts) from the cascade, keyed by YES limit price (¢).
+/// (Legacy name includes `Kalshi`; table columns unchanged.)
+/// Used to annotate orderbook rows with `cascade_size` when persisting snapshots.
+#[derive(Clone, Default, Debug)]
+pub struct KalshiCascadeOverlay {
+    bid_by_limit_cents: HashMap<i16, f64>,
+    ask_by_limit_cents: HashMap<i16, f64>,
+}
+
+impl KalshiCascadeOverlay {
+    pub fn from_limit_maps(
+        bid_by_limit_cents: HashMap<i16, f64>,
+        ask_by_limit_cents: HashMap<i16, f64>,
+    ) -> Self {
+        Self {
+            bid_by_limit_cents,
+            ask_by_limit_cents,
+        }
+    }
+
+    fn qty_bid_at_book_price(&self, price_cents_f: f64) -> f64 {
+        let k = (price_cents_f + 0.5) as i16;
+        self.bid_by_limit_cents.get(&k).copied().unwrap_or(0.0)
+    }
+
+    fn qty_ask_at_book_price(&self, price_cents_f: f64) -> f64 {
+        let k = (price_cents_f + 0.5) as i16;
+        self.ask_by_limit_cents.get(&k).copied().unwrap_or(0.0)
+    }
+}
 
 enum DbInner {
     Postgres(std::sync::Mutex<Client>),
@@ -89,12 +121,18 @@ impl ArbDb {
                 fill_amount INT,
                 abort_reason TEXT
             );
-            CREATE TABLE IF NOT EXISTS orderbook_snapshots (
+            CREATE TABLE IF NOT EXISTS kalshi_book (
                 id BIGSERIAL PRIMARY KEY,
                 ts_ms BIGINT NOT NULL,
                 market TEXT,
-                poly_book_json TEXT NOT NULL,
-                kalshi_book_json TEXT NOT NULL,
+                book_json TEXT NOT NULL,
+                trigger_event_id BIGINT REFERENCES events(id)
+            );
+            CREATE TABLE IF NOT EXISTS poly_book (
+                id BIGSERIAL PRIMARY KEY,
+                ts_ms BIGINT NOT NULL,
+                market TEXT,
+                book_json TEXT NOT NULL,
                 trigger_event_id BIGINT REFERENCES events(id)
             );
             "#,
@@ -125,10 +163,23 @@ impl ArbDb {
         .context("create events table")?;
 
         conn.query_drop(
-            r#"CREATE TABLE IF NOT EXISTS event_orderbook_levels (
+            r#"CREATE TABLE IF NOT EXISTS kalshi_orderbook_levels (
                 id BIGINT AUTO_INCREMENT PRIMARY KEY,
                 event_id BIGINT NOT NULL,
-                venue VARCHAR(16) NOT NULL,
+                side VARCHAR(8) NOT NULL,
+                level_index INT NOT NULL,
+                price DOUBLE NOT NULL,
+                size DOUBLE NOT NULL,
+                cascade_size DOUBLE NULL DEFAULT NULL,
+                INDEX idx_ob_event (event_id)
+            )"#,
+        )
+        .context("create kalshi_orderbook_levels table")?;
+
+        conn.query_drop(
+            r#"CREATE TABLE IF NOT EXISTS poly_orderbook_levels (
+                id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                event_id BIGINT NOT NULL,
                 side VARCHAR(8) NOT NULL,
                 level_index INT NOT NULL,
                 price DOUBLE NOT NULL,
@@ -136,26 +187,76 @@ impl ArbDb {
                 INDEX idx_ob_event (event_id)
             )"#,
         )
-        .context("create event_orderbook_levels table")?;
+        .context("create poly_orderbook_levels table")?;
 
         conn.query_drop(
-            r#"CREATE TABLE IF NOT EXISTS orderbook_snapshots (
+            r#"CREATE TABLE IF NOT EXISTS kalshi_book (
                 id BIGINT AUTO_INCREMENT PRIMARY KEY,
                 ts_ms BIGINT NOT NULL,
                 market VARCHAR(256),
-                poly_book_json MEDIUMTEXT NOT NULL,
-                kalshi_book_json MEDIUMTEXT NOT NULL,
+                book_json MEDIUMTEXT NOT NULL,
                 trigger_event_id BIGINT NOT NULL,
                 INDEX idx_snap_event (trigger_event_id)
             )"#,
         )
-        .context("mysql orderbook_snapshots")?;
+        .context("mysql kalshi_book")?;
+
+        conn.query_drop(
+            r#"CREATE TABLE IF NOT EXISTS poly_book (
+                id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                ts_ms BIGINT NOT NULL,
+                market VARCHAR(256),
+                book_json MEDIUMTEXT NOT NULL,
+                trigger_event_id BIGINT NOT NULL,
+                INDEX idx_snap_event (trigger_event_id)
+            )"#,
+        )
+        .context("mysql poly_book")?;
 
         Ok(())
     }
 
-    fn books_json(bids: &[PriceLevel], asks: &[PriceLevel]) -> String {
-        serde_json::json!({ "bids": bids, "asks": asks }).to_string()
+    fn books_json(
+        bids: &[PriceLevel],
+        asks: &[PriceLevel],
+        venue_is_kalshi: bool,
+        cascade: Option<&KalshiCascadeOverlay>,
+    ) -> String {
+        let bid_arr: Vec<serde_json::Value> = bids
+            .iter()
+            .map(|l| {
+                let cs = if venue_is_kalshi {
+                    cascade
+                        .map(|c| c.qty_bid_at_book_price(l.price))
+                        .unwrap_or(0.0)
+                } else {
+                    0.0
+                };
+                serde_json::json!({
+                    "price": l.price,
+                    "size": l.size,
+                    "cascade_size": cs,
+                })
+            })
+            .collect();
+        let ask_arr: Vec<serde_json::Value> = asks
+            .iter()
+            .map(|l| {
+                let cs = if venue_is_kalshi {
+                    cascade
+                        .map(|c| c.qty_ask_at_book_price(l.price))
+                        .unwrap_or(0.0)
+                } else {
+                    0.0
+                };
+                serde_json::json!({
+                    "price": l.price,
+                    "size": l.size,
+                    "cascade_size": cs,
+                })
+            })
+            .collect();
+        serde_json::json!({ "bids": bid_arr, "asks": ask_arr }).to_string()
     }
 
     pub fn record_start(
@@ -165,6 +266,7 @@ impl ArbDb {
         kalshi_asks: &[PriceLevel],
         poly_bids: &[PriceLevel],
         poly_asks: &[PriceLevel],
+        kalshi_cascade: Option<&KalshiCascadeOverlay>,
     ) -> anyhow::Result<()> {
         match &self.inner {
             DbInner::Postgres(m) => {
@@ -175,11 +277,15 @@ impl ArbDb {
                     &[&ts, &market],
                 )?;
                 let eid: i64 = rows.first().context("pg start returning id")?.get(0);
-                let pj = Self::books_json(poly_bids, poly_asks);
-                let kj = Self::books_json(kalshi_bids, kalshi_asks);
+                let pj = Self::books_json(poly_bids, poly_asks, false, None);
+                let kj = Self::books_json(kalshi_bids, kalshi_asks, true, kalshi_cascade);
                 c.execute(
-                    "INSERT INTO orderbook_snapshots (ts_ms, market, poly_book_json, kalshi_book_json, trigger_event_id) VALUES ($1, $2, $3, $4, $5)",
-                    &[&ts, &market, &pj, &kj, &eid],
+                    "INSERT INTO kalshi_book (ts_ms, market, book_json, trigger_event_id) VALUES ($1, $2, $3, $4)",
+                    &[&ts, &market, &kj, &eid],
+                )?;
+                c.execute(
+                    "INSERT INTO poly_book (ts_ms, market, book_json, trigger_event_id) VALUES ($1, $2, $3, $4)",
+                    &[&ts, &market, &pj, &eid],
                 )?;
                 Ok(())
             }
@@ -191,47 +297,85 @@ impl ArbDb {
                     (&ts,),
                 )?;
                 let event_id = conn.last_insert_id();
-                Self::insert_levels_mysql(&mut conn, event_id, "kalshi", kalshi_bids, kalshi_asks)?;
-                Self::insert_levels_mysql(&mut conn, event_id, "poly", poly_bids, poly_asks)?;
-                let pj = Self::books_json(poly_bids, poly_asks);
-                let kj = Self::books_json(kalshi_bids, kalshi_asks);
+                Self::insert_kalshi_levels_mysql(
+                    &mut conn,
+                    event_id,
+                    kalshi_bids,
+                    kalshi_asks,
+                    kalshi_cascade,
+                )?;
+                Self::insert_poly_levels_mysql(&mut conn, event_id, poly_bids, poly_asks)?;
+                let pj = Self::books_json(poly_bids, poly_asks, false, None);
+                let kj = Self::books_json(kalshi_bids, kalshi_asks, true, kalshi_cascade);
                 conn.exec_drop(
-                    "INSERT INTO orderbook_snapshots (ts_ms, market, poly_book_json, kalshi_book_json, trigger_event_id) VALUES (?, ?, ?, ?, ?)",
-                    (
-                        now_ms() as i64,
-                        market,
-                        &pj,
-                        &kj,
-                        event_id as i64,
-                    ),
+                    "INSERT INTO kalshi_book (ts_ms, market, book_json, trigger_event_id) VALUES (?, ?, ?, ?)",
+                    (now_ms() as i64, market, &kj, event_id as i64),
+                )?;
+                conn.exec_drop(
+                    "INSERT INTO poly_book (ts_ms, market, book_json, trigger_event_id) VALUES (?, ?, ?, ?)",
+                    (now_ms() as i64, market, &pj, event_id as i64),
                 )?;
                 Ok(())
             }
         }
     }
 
-    fn insert_levels_mysql(
+    fn insert_kalshi_levels_mysql(
         conn: &mut PooledConn,
         event_id: u64,
-        venue: &str,
+        bids: &[PriceLevel],
+        asks: &[PriceLevel],
+        cascade: Option<&KalshiCascadeOverlay>,
+    ) -> anyhow::Result<()> {
+        if bids.is_empty() && asks.is_empty() {
+            return Ok(());
+        }
+        let mut params: Vec<(u64, &str, i64, f64, f64, f64)> = Vec::new();
+        for (i, lvl) in bids.iter().enumerate() {
+            let cs = cascade
+                .map(|c| c.qty_bid_at_book_price(lvl.price))
+                .unwrap_or(0.0);
+            params.push((event_id, "bid", i as i64, lvl.price, lvl.size, cs));
+        }
+        for (i, lvl) in asks.iter().enumerate() {
+            let cs = cascade
+                .map(|c| c.qty_ask_at_book_price(lvl.price))
+                .unwrap_or(0.0);
+            params.push((event_id, "ask", i as i64, lvl.price, lvl.size, cs));
+        }
+        conn.exec_batch(
+            "INSERT INTO kalshi_orderbook_levels (event_id, side, level_index, price, size, cascade_size) VALUES (?, ?, ?, ?, ?, ?)",
+            params
+                .iter()
+                .map(|(eid, s, li, p, sz, cs)| (*eid, *s, *li, *p, *sz, *cs)),
+        )
+        .context("insert kalshi levels")?;
+        Ok(())
+    }
+
+    fn insert_poly_levels_mysql(
+        conn: &mut PooledConn,
+        event_id: u64,
         bids: &[PriceLevel],
         asks: &[PriceLevel],
     ) -> anyhow::Result<()> {
         if bids.is_empty() && asks.is_empty() {
             return Ok(());
         }
-        let mut params: Vec<(u64, &str, &str, i64, f64, f64)> = Vec::new();
+        let mut params: Vec<(u64, &str, i64, f64, f64)> = Vec::new();
         for (i, lvl) in bids.iter().enumerate() {
-            params.push((event_id, venue, "bid", i as i64, lvl.price, lvl.size));
+            params.push((event_id, "bid", i as i64, lvl.price, lvl.size));
         }
         for (i, lvl) in asks.iter().enumerate() {
-            params.push((event_id, venue, "ask", i as i64, lvl.price, lvl.size));
+            params.push((event_id, "ask", i as i64, lvl.price, lvl.size));
         }
         conn.exec_batch(
-            "INSERT INTO event_orderbook_levels (event_id, venue, side, level_index, price, size) VALUES (?, ?, ?, ?, ?, ?)",
-            params.iter().map(|(eid, v, s, li, p, sz)| (*eid, *v, *s, *li, *p, *sz)),
+            "INSERT INTO poly_orderbook_levels (event_id, side, level_index, price, size) VALUES (?, ?, ?, ?, ?)",
+            params
+                .iter()
+                .map(|(eid, s, li, p, sz)| (*eid, *s, *li, *p, *sz)),
         )
-        .context("insert levels")?;
+        .context("insert poly levels")?;
         Ok(())
     }
 
@@ -244,6 +388,7 @@ impl ArbDb {
         poly_asks: &[PriceLevel],
         fill_price_cents: i32,
         fill_amount: u32,
+        kalshi_cascade: Option<&KalshiCascadeOverlay>,
     ) -> anyhow::Result<()> {
         match &self.inner {
             DbInner::Postgres(m) => {
@@ -254,11 +399,15 @@ impl ArbDb {
                     &[&ts, &market, &fill_price_cents, &(fill_amount as i32)],
                 )?;
                 let eid: i64 = rows.first().context("pg fill returning id")?.get(0);
-                let pj = Self::books_json(poly_bids, poly_asks);
-                let kj = Self::books_json(kalshi_bids, kalshi_asks);
+                let pj = Self::books_json(poly_bids, poly_asks, false, None);
+                let kj = Self::books_json(kalshi_bids, kalshi_asks, true, kalshi_cascade);
                 c.execute(
-                    "INSERT INTO orderbook_snapshots (ts_ms, market, poly_book_json, kalshi_book_json, trigger_event_id) VALUES ($1, $2, $3, $4, $5)",
-                    &[&ts, &market, &pj, &kj, &eid],
+                    "INSERT INTO kalshi_book (ts_ms, market, book_json, trigger_event_id) VALUES ($1, $2, $3, $4)",
+                    &[&ts, &market, &kj, &eid],
+                )?;
+                c.execute(
+                    "INSERT INTO poly_book (ts_ms, market, book_json, trigger_event_id) VALUES ($1, $2, $3, $4)",
+                    &[&ts, &market, &pj, &eid],
                 )?;
                 Ok(())
             }
@@ -270,19 +419,23 @@ impl ArbDb {
                     (&ts, fill_price_cents, fill_amount),
                 )?;
                 let event_id = conn.last_insert_id();
-                Self::insert_levels_mysql(&mut conn, event_id, "kalshi", kalshi_bids, kalshi_asks)?;
-                Self::insert_levels_mysql(&mut conn, event_id, "poly", poly_bids, poly_asks)?;
-                let pj = Self::books_json(poly_bids, poly_asks);
-                let kj = Self::books_json(kalshi_bids, kalshi_asks);
+                Self::insert_kalshi_levels_mysql(
+                    &mut conn,
+                    event_id,
+                    kalshi_bids,
+                    kalshi_asks,
+                    kalshi_cascade,
+                )?;
+                Self::insert_poly_levels_mysql(&mut conn, event_id, poly_bids, poly_asks)?;
+                let pj = Self::books_json(poly_bids, poly_asks, false, None);
+                let kj = Self::books_json(kalshi_bids, kalshi_asks, true, kalshi_cascade);
                 conn.exec_drop(
-                    "INSERT INTO orderbook_snapshots (ts_ms, market, poly_book_json, kalshi_book_json, trigger_event_id) VALUES (?, ?, ?, ?, ?)",
-                    (
-                        now_ms() as i64,
-                        market,
-                        &pj,
-                        &kj,
-                        event_id as i64,
-                    ),
+                    "INSERT INTO kalshi_book (ts_ms, market, book_json, trigger_event_id) VALUES (?, ?, ?, ?)",
+                    (now_ms() as i64, market, &kj, event_id as i64),
+                )?;
+                conn.exec_drop(
+                    "INSERT INTO poly_book (ts_ms, market, book_json, trigger_event_id) VALUES (?, ?, ?, ?)",
+                    (now_ms() as i64, market, &pj, event_id as i64),
                 )?;
                 Ok(())
             }
@@ -302,6 +455,7 @@ impl ArbDb {
         poly_bids: &[PriceLevel],
         poly_asks: &[PriceLevel],
         context: &serde_json::Value,
+        kalshi_cascade: Option<&KalshiCascadeOverlay>,
     ) -> anyhow::Result<()> {
         let ctx_s = context.to_string();
         match &self.inner {
@@ -323,11 +477,15 @@ impl ArbDb {
                     ],
                 )?;
                 let eid: i64 = rows.first().context("pg error returning id")?.get(0);
-                let pj = Self::books_json(poly_bids, poly_asks);
-                let kj = Self::books_json(kalshi_bids, kalshi_asks);
+                let pj = Self::books_json(poly_bids, poly_asks, false, None);
+                let kj = Self::books_json(kalshi_bids, kalshi_asks, true, kalshi_cascade);
                 c.execute(
-                    "INSERT INTO orderbook_snapshots (ts_ms, market, poly_book_json, kalshi_book_json, trigger_event_id) VALUES ($1, $2, $3, $4, $5)",
-                    &[&ts, &market, &pj, &kj, &eid],
+                    "INSERT INTO kalshi_book (ts_ms, market, book_json, trigger_event_id) VALUES ($1, $2, $3, $4)",
+                    &[&ts, &market, &kj, &eid],
+                )?;
+                c.execute(
+                    "INSERT INTO poly_book (ts_ms, market, book_json, trigger_event_id) VALUES ($1, $2, $3, $4)",
+                    &[&ts, &market, &pj, &eid],
                 )?;
                 Ok(())
             }
@@ -340,19 +498,23 @@ impl ArbDb {
                     (&ts, &reason),
                 )?;
                 let event_id = conn.last_insert_id();
-                Self::insert_levels_mysql(&mut conn, event_id, "kalshi", kalshi_bids, kalshi_asks)?;
-                Self::insert_levels_mysql(&mut conn, event_id, "poly", poly_bids, poly_asks)?;
-                let pj = Self::books_json(poly_bids, poly_asks);
-                let kj = Self::books_json(kalshi_bids, kalshi_asks);
+                Self::insert_kalshi_levels_mysql(
+                    &mut conn,
+                    event_id,
+                    kalshi_bids,
+                    kalshi_asks,
+                    kalshi_cascade,
+                )?;
+                Self::insert_poly_levels_mysql(&mut conn, event_id, poly_bids, poly_asks)?;
+                let pj = Self::books_json(poly_bids, poly_asks, false, None);
+                let kj = Self::books_json(kalshi_bids, kalshi_asks, true, kalshi_cascade);
                 conn.exec_drop(
-                    "INSERT INTO orderbook_snapshots (ts_ms, market, poly_book_json, kalshi_book_json, trigger_event_id) VALUES (?, ?, ?, ?, ?)",
-                    (
-                        now_ms() as i64,
-                        market,
-                        &pj,
-                        &kj,
-                        event_id as i64,
-                    ),
+                    "INSERT INTO kalshi_book (ts_ms, market, book_json, trigger_event_id) VALUES (?, ?, ?, ?)",
+                    (now_ms() as i64, market, &kj, event_id as i64),
+                )?;
+                conn.exec_drop(
+                    "INSERT INTO poly_book (ts_ms, market, book_json, trigger_event_id) VALUES (?, ?, ?, ?)",
+                    (now_ms() as i64, market, &pj, event_id as i64),
                 )?;
                 Ok(())
             }
@@ -369,6 +531,7 @@ impl ArbDb {
         is_bid: bool,
         vol_before: f64,
         vol_after: f64,
+        kalshi_cascade: Option<&KalshiCascadeOverlay>,
     ) -> anyhow::Result<()> {
         match &self.inner {
             DbInner::Postgres(_) => Ok(()),
@@ -381,8 +544,14 @@ impl ArbDb {
                     (&ts, price_cents, vol_before, vol_after, side_str),
                 )?;
                 let event_id = conn.last_insert_id();
-                Self::insert_levels_mysql(&mut conn, event_id, "kalshi", kalshi_bids, kalshi_asks)?;
-                Self::insert_levels_mysql(&mut conn, event_id, "poly", poly_bids, poly_asks)?;
+                Self::insert_kalshi_levels_mysql(
+                    &mut conn,
+                    event_id,
+                    kalshi_bids,
+                    kalshi_asks,
+                    kalshi_cascade,
+                )?;
+                Self::insert_poly_levels_mysql(&mut conn, event_id, poly_bids, poly_asks)?;
                 Ok(())
             }
         }
@@ -396,6 +565,7 @@ impl ArbDb {
         kalshi_asks: &[PriceLevel],
         poly_bids: &[PriceLevel],
         poly_asks: &[PriceLevel],
+        kalshi_cascade: Option<&KalshiCascadeOverlay>,
     ) -> anyhow::Result<()> {
         match &self.inner {
             DbInner::Postgres(m) => {
@@ -406,11 +576,15 @@ impl ArbDb {
                     &[&ts, &market, &reason],
                 )?;
                 let eid: i64 = rows.first().context("pg abort returning id")?.get(0);
-                let pj = Self::books_json(poly_bids, poly_asks);
-                let kj = Self::books_json(kalshi_bids, kalshi_asks);
+                let pj = Self::books_json(poly_bids, poly_asks, false, None);
+                let kj = Self::books_json(kalshi_bids, kalshi_asks, true, kalshi_cascade);
                 c.execute(
-                    "INSERT INTO orderbook_snapshots (ts_ms, market, poly_book_json, kalshi_book_json, trigger_event_id) VALUES ($1, $2, $3, $4, $5)",
-                    &[&ts, &market, &pj, &kj, &eid],
+                    "INSERT INTO kalshi_book (ts_ms, market, book_json, trigger_event_id) VALUES ($1, $2, $3, $4)",
+                    &[&ts, &market, &kj, &eid],
+                )?;
+                c.execute(
+                    "INSERT INTO poly_book (ts_ms, market, book_json, trigger_event_id) VALUES ($1, $2, $3, $4)",
+                    &[&ts, &market, &pj, &eid],
                 )?;
                 Ok(())
             }
@@ -422,22 +596,90 @@ impl ArbDb {
                     (&ts, reason),
                 )?;
                 let event_id = conn.last_insert_id();
-                Self::insert_levels_mysql(&mut conn, event_id, "kalshi", kalshi_bids, kalshi_asks)?;
-                Self::insert_levels_mysql(&mut conn, event_id, "poly", poly_bids, poly_asks)?;
-                let pj = Self::books_json(poly_bids, poly_asks);
-                let kj = Self::books_json(kalshi_bids, kalshi_asks);
-                let _ = conn.exec_drop(
-                    "INSERT INTO orderbook_snapshots (ts_ms, market, poly_book_json, kalshi_book_json, trigger_event_id) VALUES (?, ?, ?, ?, ?)",
-                    (
-                        now_ms() as i64,
-                        market,
-                        &pj,
-                        &kj,
-                        event_id as i64,
-                    ),
-                );
+                Self::insert_kalshi_levels_mysql(
+                    &mut conn,
+                    event_id,
+                    kalshi_bids,
+                    kalshi_asks,
+                    kalshi_cascade,
+                )?;
+                Self::insert_poly_levels_mysql(&mut conn, event_id, poly_bids, poly_asks)?;
+                let pj = Self::books_json(poly_bids, poly_asks, false, None);
+                let kj = Self::books_json(kalshi_bids, kalshi_asks, true, kalshi_cascade);
+                if let Err(e) = conn.exec_drop(
+                    "INSERT INTO kalshi_book (ts_ms, market, book_json, trigger_event_id) VALUES (?, ?, ?, ?)",
+                    (now_ms() as i64, market, &kj, event_id as i64),
+                ) {
+                    eprintln!("[db:record_abort.kalshi_book] {e:#}");
+                }
+                if let Err(e) = conn.exec_drop(
+                    "INSERT INTO poly_book (ts_ms, market, book_json, trigger_event_id) VALUES (?, ?, ?, ?)",
+                    (now_ms() as i64, market, &pj, event_id as i64),
+                ) {
+                    eprintln!("[db:record_abort.poly_book] {e:#}");
+                }
                 Ok(())
             }
         }
+    }
+
+    /// Marker row for manual / CI checks (`setup_db_write` binary). Writes `events` plus empty
+    /// `kalshi_book` / `poly_book` snapshots linked to the new event id.
+    pub fn record_setup_test_info(
+        &self,
+        market: &str,
+        info_message: &str,
+        context: &serde_json::Value,
+    ) -> anyhow::Result<()> {
+        let ctx_s = context.to_string();
+        let kj = Self::books_json(&[], &[], true, None);
+        let pj = Self::books_json(&[], &[], false, None);
+        match &self.inner {
+            DbInner::Postgres(m) => {
+                let mut c = m.lock().expect("pg mutex");
+                let ts = now_ms() as i64;
+                let rows = c.query(
+                    "INSERT INTO events (ts_ms, venue, event_type, market, message, context_json) VALUES ($1, 'system', 'setup_test', $2, $3, $4) RETURNING id",
+                    &[&ts, &market, &info_message, &ctx_s],
+                )?;
+                let eid: i64 = rows.first().context("pg setup_test returning id")?.get(0);
+                c.execute(
+                    "INSERT INTO kalshi_book (ts_ms, market, book_json, trigger_event_id) VALUES ($1, $2, $3, $4)",
+                    &[&ts, &market, &kj, &eid],
+                )?;
+                c.execute(
+                    "INSERT INTO poly_book (ts_ms, market, book_json, trigger_event_id) VALUES ($1, $2, $3, $4)",
+                    &[&ts, &market, &pj, &eid],
+                )?;
+                Ok(())
+            }
+            DbInner::Mysql(pool) => {
+                let mut conn = pool.get_conn().context("mysql get_conn")?;
+                let ts = format!("{}", now_ms() / 1000);
+                let abort_payload =
+                    format!("setup_test|market={market}|msg={info_message}|ctx={ctx_s}");
+                conn.exec_drop(
+                    "INSERT INTO events (ts, action_type, abort_reason) VALUES (?, 'setup_test', ?)",
+                    (&ts, &abort_payload),
+                )?;
+                let event_id = conn.last_insert_id();
+                conn.exec_drop(
+                    "INSERT INTO kalshi_book (ts_ms, market, book_json, trigger_event_id) VALUES (?, ?, ?, ?)",
+                    (now_ms() as i64, market, &kj, event_id as i64),
+                )?;
+                conn.exec_drop(
+                    "INSERT INTO poly_book (ts_ms, market, book_json, trigger_event_id) VALUES (?, ?, ?, ?)",
+                    (now_ms() as i64, market, &pj, event_id as i64),
+                )?;
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Log database write errors to stderr (`record_*` is best-effort and must not hide failures).
+pub fn log_db(op: &str, result: anyhow::Result<()>) {
+    if let Err(e) = result {
+        eprintln!("[db:{op}] {e:#}");
     }
 }

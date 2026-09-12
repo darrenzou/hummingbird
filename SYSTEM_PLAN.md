@@ -1,9 +1,14 @@
 # Polymarket–Kalshi Cross-Exchange Arbitrage System
 ## Complete Technical Specification
 
-> **Purpose:** This document is the canonical description of the arbitrage system.
-> It is written in language-neutral terms so it can be used as a blueprint to
-> reimplement, extend, or port the system to any programming language or runtime.
+> **Retired archive.** Hummingbird is no longer operated. Polymarket and Kalshi
+> later changed API processes and trading rules, so this document is historical.
+> The C implementation described in the appendices was removed; the remaining
+> code is the Rust port in `hummingbird_rust/`.
+>
+> **Purpose:** Language-neutral description of the original design. Prefer the
+> Rust sources when they disagree with this file (IPC is version 2 in Rust,
+> not the fixed C `ArbMsg` struct).
 
 ---
 
@@ -179,12 +184,12 @@ any lines after the `KEY=value` line up to the next blank line.
 | `KALSHI_API_KEY_ID` | Kalshi API key UUID |
 | `KALSHI_PRIVATE_KEY_PATH` | Path to RSA private key `.pem` file |
 | `KALSHI_PRIVATE_KEY_PEM` | Inline RSA PEM (overrides path if set) |
-| `DB_HOST` | RDS host (default: `database-1.cz6uu00gwfxx.eu-west-1.rds.amazonaws.com`) |
-| `DB_PORT` | RDS port (default: `3306`) |
-| `DB_USER` | RDS username (default: `admin`) |
-| `DB_PASS` | RDS password |
-| `DB_NAME` | Database name (default: `arb`) |
-| `DB_SSL_CA` | Path to CA certificate bundle (default: `/certs/global-bundle.pem`) |
+| `DB_HOST` | MySQL / MariaDB host (optional; prefer `DATABASE_URL` in the Rust port) |
+| `DB_PORT` | Database port |
+| `DB_USER` | Database username |
+| `DB_PASS` | Database password |
+| `DB_NAME` | Database name |
+| `DB_SSL_CA` | Path to TLS CA bundle |
 
 ### 4.3 Max Pairs
 
@@ -991,22 +996,12 @@ Key format: PKCS#8 RSA private key in PEM format (`-----BEGIN PRIVATE KEY-----`)
 
 ---
 
-## Appendix A: File Structure (C Implementation)
+## Appendix A: File Structure
 
-```
-hummingbird/
-├── config.json          # Market pair configuration
-├── .env                 # Credentials (not committed)
-├── Makefile
-├── arb_main.c           # Entry point: process supervisor
-├── arb_config.c/h       # Config/credential loading, time helpers
-├── arb_ipc.c/h          # IPC message structs and pipe transport
-├── arb_poly.c/h         # Polymarket worker (WebSocket, EIP-712, REST)
-├── arb_kalshi.c/h       # Kalshi worker (WebSocket, RSA-PSS, REST, DB)
-└── market_lookup.py     # Standalone diagnostic tool (Python)
-```
+The original C tree (`arb_*.c`, `hummingbirdv2/`) was removed from this archive.
+The remaining implementation is `hummingbird_rust/` (see the root README).
 
-## Appendix B: Dependencies (C Implementation)
+## Appendix B: Dependencies (removed C implementation)
 
 | Library | Purpose |
 |---------|---------|

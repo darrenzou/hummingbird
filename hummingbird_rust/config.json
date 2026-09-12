@@ -1,14 +1,15 @@
 {
   "db_path": "arb_events.db",
-  "side_cap": 1000,
-  "kalshi_balance": 2000,
-  "poly_balance": 2000,
+  "side_cap": 100.0,
+  "kalshi_balance": 100.0,
+  "poly_balance": 100.0,
   "pairs": [
     {
-      "polymarket_token_id": "70364657290228044448461397404440906092275799648915793839023224483022545171360",
-      "kalshi_ticker": "KXEUROVISION-26-FIN",
-      "neg_risk": true
+      "polymarket_token_id": "<yes-token-id>",
+      "polymarket_no_token_id": "<no-token-id>",
+      "kalshi_ticker": "<kalshi-ticker>",
+      "neg_risk": true,
+      "maker": "kalshi"
     }
   ]
 }
-

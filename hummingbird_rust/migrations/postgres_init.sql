@@ -14,11 +14,17 @@ CREATE TABLE IF NOT EXISTS events (
     abort_reason TEXT
 );
 
-CREATE TABLE IF NOT EXISTS orderbook_snapshots (
+CREATE TABLE IF NOT EXISTS kalshi_book (
     id BIGSERIAL PRIMARY KEY,
     ts_ms BIGINT NOT NULL,
     market TEXT,
-    poly_book_json TEXT NOT NULL,
-    kalshi_book_json TEXT NOT NULL,
+    book_json TEXT NOT NULL,
+    trigger_event_id BIGINT REFERENCES events(id)
+);
+CREATE TABLE IF NOT EXISTS poly_book (
+    id BIGSERIAL PRIMARY KEY,
+    ts_ms BIGINT NOT NULL,
+    market TEXT,
+    book_json TEXT NOT NULL,
     trigger_event_id BIGINT REFERENCES events(id)
 );

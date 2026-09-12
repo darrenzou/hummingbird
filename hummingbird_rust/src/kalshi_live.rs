@@ -20,6 +20,20 @@ const WS_PATH: &str = "/trade-api/ws/v2";
 pub const BATCH_MAX: usize = 20;
 const MAX_LEVELS: usize = 128;
 
+/// `BatchCreateOrdersIndividualResponse` from Kalshi OpenAPI: `order_id` lives on nested `order`, not top-level.
+fn batch_response_order_id(item: &serde_json::Value) -> String {
+    item.get("order_id")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned)
+        .or_else(|| {
+            item.get("order")
+                .and_then(|o| o.get("order_id"))
+                .and_then(|v| v.as_str())
+                .map(str::to_owned)
+        })
+        .unwrap_or_default()
+}
+
 #[derive(Clone)]
 struct Level {
     price: i32,
@@ -31,6 +45,8 @@ pub struct KalshiBatchOrder {
     pub count: i32,
     pub yes_price: i32,
     pub client_order_id: Option<String>,
+    /// When `Some`, sent as Kalshi `time_in_force` (e.g. `fill_or_kill`). Default: `good_till_canceled`.
+    pub time_in_force: Option<String>,
 }
 
 struct PendingFill {
@@ -147,21 +163,40 @@ fn levels_from_fp_dollars_side(arr: &serde_json::Value) -> Vec<Level> {
     levels
 }
 
-/// Parse `orderbook_fp` object into yes/no level ladders.
-fn levels_from_orderbook_fp(fp: &serde_json::Value) -> Option<(Vec<Level>, Vec<Level>)> {
-    let yes_d = fp.get("yes_dollars")?;
-    let no_d = fp.get("no_dollars")?;
-    Some((
-        levels_from_fp_dollars_side(yes_d),
-        levels_from_fp_dollars_side(no_d),
-    ))
+/// Parse orderbook into yes/no ladders. Handles yes_dollars_fp/no_dollars_fp (new API),
+/// yes_dollars/no_dollars, and legacy yes/no. Missing side → empty.
+fn levels_from_orderbook_fp_partial(fp: &serde_json::Value) -> (Vec<Level>, Vec<Level>) {
+    let yes = fp
+        .get("yes_dollars_fp")
+        .or_else(|| fp.get("yes_dollars"))
+        .map(levels_from_fp_dollars_side)
+        .unwrap_or_default();
+    let no = fp
+        .get("no_dollars_fp")
+        .or_else(|| fp.get("no_dollars"))
+        .map(levels_from_fp_dollars_side)
+        .unwrap_or_default();
+    (yes, no)
 }
 
-/// Parse REST `GET /markets/{t}/orderbook` or WS snapshot `msg` (same shapes as kalshi_test.py).
-fn parse_orderbook_json_value(root: &serde_json::Value) -> anyhow::Result<(Vec<Level>, Vec<Level>)> {
+/// Parse REST `GET /markets/{t}/orderbook` or WS snapshot `msg`.
+/// WS snapshot: msg has yes_dollars_fp/no_dollars_fp at root (per Kalshi docs).
+fn parse_orderbook_json_value(
+    root: &serde_json::Value,
+) -> anyhow::Result<(Vec<Level>, Vec<Level>)> {
+    // WS snapshot: yes_dollars_fp/no_dollars_fp at root
+    if root.get("yes_dollars_fp").is_some() || root.get("no_dollars_fp").is_some() {
+        let (yes, no) = levels_from_orderbook_fp_partial(root);
+        return Ok((yes, no));
+    }
+    if root.get("yes_dollars").is_some() || root.get("no_dollars").is_some() {
+        let (yes, no) = levels_from_orderbook_fp_partial(root);
+        return Ok((yes, no));
+    }
     if let Some(fp) = root.get("orderbook_fp") {
-        if let Some(pair) = levels_from_orderbook_fp(fp) {
-            return Ok(pair);
+        let (yes, no) = levels_from_orderbook_fp_partial(fp);
+        if !yes.is_empty() || !no.is_empty() {
+            return Ok((yes, no));
         }
     }
     if let Some(ob) = root.get("orderbook") {
@@ -260,13 +295,14 @@ impl KalshiLive {
                     .client_order_id
                     .clone()
                     .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                let tif = o.time_in_force.as_deref().unwrap_or("good_till_canceled");
                 serde_json::json!({
                     "ticker": self.ticker,
                     "side": "yes",
                     "action": o.action,
                     "count": o.count,
                     "yes_price": o.yes_price,
-                    "time_in_force": "good_till_canceled",
+                    "time_in_force": tif,
                     "client_order_id": coid,
                 })
             })
@@ -277,11 +313,7 @@ impl KalshiLive {
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&resp) {
             if let Some(arr) = json.get("orders").and_then(|o| o.as_array()) {
                 for item in arr {
-                    let oid = item
-                        .get("order_id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
+                    let oid = batch_response_order_id(item);
                     ids.push(oid);
                 }
             }
@@ -331,6 +363,39 @@ impl KalshiLive {
         false
     }
 
+    /// Raw HTTP response for amend (for callers that need status codes / retry).
+    pub fn amend_order_http(
+        &self,
+        order_id: &str,
+        side: &str,
+        action: &str,
+        yes_price: i32,
+        count: i32,
+    ) -> (u16, String) {
+        if order_id.is_empty() {
+            return (400, "empty order_id".into());
+        }
+        let body = serde_json::json!({
+            "ticker": self.ticker,
+            "side": side,
+            "action": action,
+            "yes_price": yes_price,
+            "count": count,
+        })
+        .to_string();
+        let path = format!("/portfolio/orders/{order_id}/amend");
+        self.http("POST", &path, Some(&body))
+    }
+
+    /// Raw HTTP for cancel (`DELETE /portfolio/orders/{id}`).
+    pub fn cancel_order_http(&self, order_id: &str) -> (u16, String) {
+        if order_id.is_empty() {
+            return (400, "empty order_id".into());
+        }
+        let path = format!("/portfolio/orders/{order_id}");
+        self.http("DELETE", &path, None)
+    }
+
     pub fn get_balance(&self) -> f64 {
         let (_, resp) = self.http("GET", "/portfolio/balance", None);
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&resp) {
@@ -347,12 +412,12 @@ impl KalshiLive {
 
     /// Public REST orderbook — same endpoint as `kalshi_test.py` `get_orderbook(..., auth=False)`.
     /// Supports `orderbook_fp` (`yes_dollars` / `no_dollars`) and legacy `orderbook` / flat `yes`+`no`.
-    pub fn fetch_public_orderbook(ticker: &str) -> anyhow::Result<(Vec<(f64, f64)>, Vec<(f64, f64)>)> {
+    pub fn fetch_public_orderbook(
+        ticker: &str,
+    ) -> anyhow::Result<(Vec<(f64, f64)>, Vec<(f64, f64)>)> {
         let path = format!("/markets/{ticker}/orderbook?depth=0");
         let url = format!("{REST_BASE}{path}");
-        let result = ureq::get(&url)
-            .set("Accept", "application/json")
-            .call();
+        let result = ureq::get(&url).set("Accept", "application/json").call();
         let (status, body) = match result {
             Ok(resp) => {
                 let s = resp.status();
@@ -377,10 +442,7 @@ impl KalshiLive {
     }
 
     fn levels_to_bids_asks(yes: &[Level], no: &[Level]) -> (Vec<(f64, f64)>, Vec<(f64, f64)>) {
-        let bids: Vec<(f64, f64)> = yes
-            .iter()
-            .map(|l| (l.price as f64, l.qty as f64))
-            .collect();
+        let bids: Vec<(f64, f64)> = yes.iter().map(|l| (l.price as f64, l.qty as f64)).collect();
         let asks: Vec<(f64, f64)> = no
             .iter()
             .map(|l| ((100 - l.price) as f64, l.qty as f64))
@@ -435,6 +497,40 @@ impl KalshiLive {
         }
         eprintln!(
             "[kalshi] orderbook snapshot: yes={} no={}",
+            self.yes.len(),
+            self.no.len()
+        );
+        Ok(())
+    }
+
+    /// If the WS snapshot left the book empty, load the same public REST book as `orderbook_web`
+    /// (`GET /markets/{ticker}/orderbook?depth=0`). Kalshi WS payloads sometimes omit or use shapes
+    /// that parse as empty while REST returns full `orderbook_fp`.
+    pub fn seed_orderbook_from_public_rest_if_empty(&mut self) -> anyhow::Result<()> {
+        if !self.yes.is_empty() || !self.no.is_empty() {
+            return Ok(());
+        }
+        let (bids, asks) = Self::fetch_public_orderbook(&self.ticker)?;
+        self.yes = bids
+            .iter()
+            .filter(|(_, s)| *s > 0.0)
+            .map(|(p, s)| Level {
+                price: *p as i32,
+                qty: *s as i32,
+            })
+            .collect();
+        self.no = asks
+            .iter()
+            .filter(|(_, s)| *s > 0.0)
+            .map(|(p, s)| Level {
+                price: (100.0 - *p) as i32,
+                qty: *s as i32,
+            })
+            .collect();
+        self.yes.sort_by_key(|l| l.price);
+        self.no.sort_by_key(|l| l.price);
+        eprintln!(
+            "[kalshi] seeded empty WS book from public REST: yes={} no={}",
             self.yes.len(),
             self.no.len()
         );
@@ -497,23 +593,31 @@ impl KalshiLive {
             Ok(v) => v,
             Err(_) => return,
         };
+        // Kalshi sometimes batches multiple events in one JSON array; a bare array has no `type`,
+        // so we used to drop the whole frame and never set `got_snapshot`.
+        if let Some(arr) = root.as_array() {
+            for item in arr {
+                self.handle_ws_json_object(item);
+            }
+        } else {
+            self.handle_ws_json_object(&root);
+        }
+    }
+
+    fn handle_ws_json_object(&mut self, root: &serde_json::Value) {
         let msg_type = root.get("type").and_then(|v| v.as_str()).unwrap_or("");
         match msg_type {
             "orderbook_snapshot" => {
-                let msg = root.get("msg").unwrap_or(&root);
-                let (yes, no) = if let Some(fp) = msg.get("orderbook_fp") {
-                    if let Some(p) = levels_from_orderbook_fp(fp) {
-                        p
-                    } else {
-                        (
-                            levels_from_snapshot(
-                                msg.get("yes").unwrap_or(&serde_json::Value::Null),
-                            ),
-                            levels_from_snapshot(
-                                msg.get("no").unwrap_or(&serde_json::Value::Null),
-                            ),
-                        )
-                    }
+                let msg = root.get("msg").unwrap_or(root);
+                // WS snapshot: msg has yes_dollars_fp/no_dollars_fp or yes_dollars/no_dollars at root
+                let (yes, no) = if msg.get("yes_dollars_fp").is_some()
+                    || msg.get("no_dollars_fp").is_some()
+                    || msg.get("yes_dollars").is_some()
+                    || msg.get("no_dollars").is_some()
+                {
+                    levels_from_orderbook_fp_partial(msg)
+                } else if let Some(fp) = msg.get("orderbook_fp") {
+                    levels_from_orderbook_fp_partial(fp)
                 } else if let Some(ob) = msg.get("orderbook") {
                     (
                         levels_from_snapshot(ob.get("yes").unwrap_or(&serde_json::Value::Null)),
@@ -521,9 +625,7 @@ impl KalshiLive {
                     )
                 } else {
                     (
-                        levels_from_snapshot(
-                            msg.get("yes").unwrap_or(&serde_json::Value::Null),
-                        ),
+                        levels_from_snapshot(msg.get("yes").unwrap_or(&serde_json::Value::Null)),
                         levels_from_snapshot(msg.get("no").unwrap_or(&serde_json::Value::Null)),
                     )
                 };
@@ -533,13 +635,31 @@ impl KalshiLive {
             }
             "orderbook_delta" => {
                 let msg = root.get("msg").unwrap_or(&root);
-                let price = msg.get("price").and_then(|v| v.as_f64()).unwrap_or(0.0) as i32;
-                let delta = msg.get("delta").and_then(|v| v.as_f64()).unwrap_or(0.0) as i32;
+                // API sends price_dollars (string "0.960") or price (legacy cents)
+                let price_cents: Option<i32> = msg
+                    .get("price_dollars_fp")
+                    .or_else(|| msg.get("price_dollars"))
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .map(|f| (f * 100.0).round() as i32)
+                    .or_else(|| msg.get("price").and_then(|v| v.as_f64()).map(|f| f as i32));
+                // API sends delta_fp (string "-54.00") or delta (legacy)
+                let delta: Option<i32> = msg
+                    .get("delta_fp")
+                    .or_else(|| msg.get("delta"))
+                    .and_then(|v| {
+                        v.as_str()
+                            .and_then(|s| s.parse::<f64>().ok())
+                            .or_else(|| v.as_f64())
+                    })
+                    .map(|f| f as i32);
                 let side = msg.get("side").and_then(|v| v.as_str()).unwrap_or("");
-                match side {
-                    "yes" => update_levels(&mut self.yes, price, delta),
-                    "no" => update_levels(&mut self.no, price, delta),
-                    _ => {}
+                if let (Some(price), Some(d)) = (price_cents, delta) {
+                    match side {
+                        "yes" => update_levels(&mut self.yes, price, d),
+                        "no" => update_levels(&mut self.no, price, d),
+                        _ => {}
+                    }
                 }
             }
             "fill" => {
@@ -557,7 +677,18 @@ impl KalshiLive {
                     order_id: oid,
                 });
             }
-            _ => {}
+            "error" | "subscription_error" => {
+                let detail = root
+                    .get("msg")
+                    .or_else(|| root.get("data"))
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| root.to_string());
+                eprintln!("[kalshi] WebSocket error frame: type={msg_type} {detail}");
+            }
+            "subscribed" | "ok" => {}
+            _ => {
+                // Heartbeats, command acks, future message types — ignored.
+            }
         }
     }
 
@@ -574,7 +705,7 @@ impl KalshiLive {
                 "id": 2,
                 "cmd": "subscribe",
                 "params": {
-                    "channels": ["user_fills"],
+                    "channels": ["fill"],
                     "market_tickers": [self.ticker],
                 }
             });

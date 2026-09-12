@@ -1,0 +1,169 @@
+{
+  "version": 1,
+  "description": "Saved orderbook scenarios for arb tests and simulations. Kalshi prices are cents (f64); Polymarket prices are dollars 0–1 (f64, 3dp). Kalshi bids must be sorted high→low; Kalshi asks low→high; Poly bids high→low; Poly asks low→high (same as live code).",
+  "defaults": {
+    "kalshi_balance": 10000.0,
+    "poly_balance": 10000.0,
+    "side_cap": 5000.0
+  },
+  "examples": [
+    {
+      "id": "ex1_poly_inside_kalshi_spread_then_lift_asks",
+      "description": "Initial: poly ask < kalshi ask + 1, poly bid > kalshi bid + 1 (Poly quote sits inside Kalshi’s spread in ¢ space). Then Kalshi best ask and Poly best ask both move higher.",
+      "notes": [
+        "Initial Kalshi touch: bid 50¢, ask 60¢; Poly best bid 55¢, best ask 58¢ → bid limit 51 < p_bid; k_ask 60 > p_ask+1.",
+        "After step 2: lift Kalshi best ask to 65¢ lift Poly best ask to 62¢ (poly ask < kalshi ask + 1 still holds)."
+      ],
+      "steps": [
+        {
+          "label": "initial",
+          "kalshi": {
+            "bids": [{ "price": 50.0, "size": 200.0 }, { "price": 45.0, "size": 200.0 }],
+            "asks": [{ "price": 60.0, "size": 200.0 }, { "price": 65.0, "size": 200.0 }]
+          },
+          "poly": {
+            "bids": [
+              { "price": 0.55, "size": 150.0 },
+              { "price": 0.52, "size": 150.0 },
+              { "price": 0.51, "size": 150.0 }
+            ],
+            "asks": [
+              { "price": 0.58, "size": 150.0 },
+              { "price": 0.62, "size": 150.0 },
+              { "price": 0.66, "size": 150.0 }
+            ]
+          },
+          "checks": {
+            "poly_ask_lt_kalshi_ask_plus_1": true,
+            "poly_bid_gt_kalshi_bid_plus_1": true,
+            "expect_non_empty_bid_cascade": true,
+            "expect_non_empty_ask_cascade": true
+          }
+        },
+        {
+          "label": "after_move_kalshi_ask_and_poly_ask",
+          "kalshi": {
+            "bids": [{ "price": 50.0, "size": 200.0 }, { "price": 45.0, "size": 200.0 }],
+            "asks": [{ "price": 65.0, "size": 200.0 }, { "price": 70.0, "size": 200.0 }]
+          },
+          "poly": {
+            "bids": [
+              { "price": 0.55, "size": 150.0 },
+              { "price": 0.52, "size": 150.0 },
+              { "price": 0.51, "size": 150.0 }
+            ],
+            "asks": [
+              { "price": 0.62, "size": 150.0 },
+              { "price": 0.65, "size": 150.0 },
+              { "price": 0.70, "size": 150.0 }
+            ]
+          },
+          "checks": {
+            "poly_ask_lt_kalshi_ask_plus_1": true,
+            "expect_non_empty_ask_cascade": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "ex2_kalshi_ask_below_poly_then_lift_kalshi_ask",
+      "description": "Initial: Kalshi ask < Poly ask and (Kalshi bid + 1) < Poly bid — bid leg can work, ask leg tight to Poly. Then raise Kalshi best ask so poly ask < kalshi ask + 1 and k_ask > p_ask + 1 for ask cascade.",
+      "steps": [
+        {
+          "label": "initial_ask_disqualified",
+          "kalshi": {
+            "bids": [{ "price": 50.0, "size": 200.0 }],
+            "asks": [{ "price": 52.0, "size": 200.0 }]
+          },
+          "poly": {
+            "bids": [{ "price": 0.56, "size": 200.0 }, { "price": 0.52, "size": 200.0 }],
+            "asks": [{ "price": 0.55, "size": 200.0 }, { "price": 0.60, "size": 200.0 }]
+          },
+          "checks": {
+            "kalshi_ask_lt_poly_ask": true,
+            "kalshi_bid_plus_1_lt_poly_bid": true,
+            "expect_non_empty_bid_cascade": true,
+            "expect_empty_ask_cascade": true
+          }
+        },
+        {
+          "label": "after_raise_kalshi_best_ask",
+          "kalshi": {
+            "bids": [{ "price": 50.0, "size": 200.0 }],
+            "asks": [{ "price": 57.0, "size": 200.0 }, { "price": 62.0, "size": 200.0 }]
+          },
+          "poly": {
+            "bids": [{ "price": 0.56, "size": 200.0 }, { "price": 0.52, "size": 200.0 }],
+            "asks": [{ "price": 0.55, "size": 200.0 }, { "price": 0.60, "size": 200.0 }]
+          },
+          "checks": {
+            "poly_ask_lt_kalshi_ask_plus_1": true,
+            "expect_non_empty_ask_cascade": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "ex3_half_poly_liquidity",
+      "description": "Same prices as ex1 initial; every Polymarket size is 50% (was 150 → 75).",
+      "steps": [
+        {
+          "label": "initial_poly_liquidity_halved",
+          "kalshi": {
+            "bids": [{ "price": 50.0, "size": 200.0 }, { "price": 45.0, "size": 200.0 }],
+            "asks": [{ "price": 60.0, "size": 200.0 }, { "price": 65.0, "size": 200.0 }]
+          },
+          "poly": {
+            "bids": [
+              { "price": 0.55, "size": 75.0 },
+              { "price": 0.52, "size": 75.0 },
+              { "price": 0.51, "size": 75.0 }
+            ],
+            "asks": [
+              { "price": 0.58, "size": 75.0 },
+              { "price": 0.62, "size": 75.0 },
+              { "price": 0.66, "size": 75.0 }
+            ]
+          },
+          "checks": {
+            "poly_ask_lt_kalshi_ask_plus_1": true,
+            "poly_bid_gt_kalshi_bid_plus_1": true,
+            "expect_non_empty_bid_cascade": true,
+            "expect_non_empty_ask_cascade": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "ex4_half_kalshi_liquidity",
+      "description": "Same prices as ex1 initial; every Kalshi size is 50% (was 200 → 100).",
+      "steps": [
+        {
+          "label": "initial_kalshi_liquidity_halved",
+          "kalshi": {
+            "bids": [{ "price": 50.0, "size": 100.0 }, { "price": 45.0, "size": 100.0 }],
+            "asks": [{ "price": 60.0, "size": 100.0 }, { "price": 65.0, "size": 100.0 }]
+          },
+          "poly": {
+            "bids": [
+              { "price": 0.55, "size": 150.0 },
+              { "price": 0.52, "size": 150.0 },
+              { "price": 0.51, "size": 150.0 }
+            ],
+            "asks": [
+              { "price": 0.58, "size": 150.0 },
+              { "price": 0.62, "size": 150.0 },
+              { "price": 0.66, "size": 150.0 }
+            ]
+          },
+          "checks": {
+            "poly_ask_lt_kalshi_ask_plus_1": true,
+            "poly_bid_gt_kalshi_bid_plus_1": true,
+            "expect_non_empty_bid_cascade": true,
+            "expect_non_empty_ask_cascade": true
+          }
+        }
+      ]
+    }
+  ]
+}

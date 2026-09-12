@@ -57,6 +57,13 @@ pub fn send_msg<T: Serialize>(fd: RawFd, msg: &T) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Like [`send_msg`], but log failures to stderr (peer may be gone).
+pub fn send_msg_eprint<T: Serialize>(fd: RawFd, msg: &T, label: &str) {
+    if let Err(e) = send_msg(fd, msg) {
+        eprintln!("[ipc:{label}] send failed: {e:#}");
+    }
+}
+
 pub fn recv_msg<T: DeserializeOwned>(fd: RawFd) -> anyhow::Result<T> {
     let mut header = [0u8; 4];
     let dup = unsafe { libc::dup(fd) };
@@ -87,10 +94,17 @@ pub fn poll_readable(fd: RawFd, timeout_ms: i32) -> anyhow::Result<bool> {
         tv_sec: (timeout_ms / 1000) as libc::time_t,
         tv_usec: ((timeout_ms % 1000) * 1000) as libc::suseconds_t,
     };
-    let r = unsafe { libc::select(fd + 1, &mut rfds, std::ptr::null_mut(), std::ptr::null_mut(), &mut tv) };
+    let r = unsafe {
+        libc::select(
+            fd + 1,
+            &mut rfds,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut tv,
+        )
+    };
     if r < 0 {
         return Err(std::io::Error::last_os_error()).context("select failed");
     }
     Ok(r > 0 && unsafe { libc::FD_ISSET(fd, &mut rfds) })
 }
-

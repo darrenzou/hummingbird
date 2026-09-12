@@ -5,7 +5,11 @@ pub mod arb_kalshi;
 pub mod arb_poly;
 pub mod error_policy;
 pub mod kalshi_live;
+pub mod kalshi_taker;
+pub mod maker_runtime;
 pub mod poly_live;
+pub mod poly_merge;
+pub mod shutdown;
 pub mod strategy;
+pub mod taker_runtime;
 pub mod types;
-
