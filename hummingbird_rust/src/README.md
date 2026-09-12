@@ -1,8 +1,6 @@
-# hummingbird_rust
+# Source map
 
-Rust implementation of Hummingbird. The project is **retired** — see the
-[repository README](../../README.md).
+Start at `lib.rs` (crate docs), then `main.rs`, `strategy.rs`, and `types.rs`.
+Each module file has a short header describing its role.
 
-This tree is the live adapters (Polymarket + Kalshi WebSocket/REST), cascade
-strategy, IPC v2, and optional Postgres/MySQL logging. It is not a current
-trading system.
+The project is retired — see the [repository README](../../README.md).

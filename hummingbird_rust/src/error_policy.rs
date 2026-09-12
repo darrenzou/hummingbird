@@ -1,4 +1,7 @@
-//! HTTP / API classification: 429 → retry; most other codes → fatal + AbortFatal.
+//! HTTP status classification for venue REST calls.
+//!
+//! 429 (and transport `0`) are retried with backoff. Other 4xx/5xx abort the
+//! pair and send `AbortFatal` to the peer.
 
 pub fn http_is_rate_limited(status: u16) -> bool {
     status == 429

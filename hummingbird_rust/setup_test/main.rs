@@ -1,4 +1,4 @@
-//! Kalshi + Polymarket connectivity test (credentials from repo `.env`).
+//! Historical connectivity harness (Kalshi + Polymarket). Not maintained.
 //!
 //! - Finds the first market on each venue with best bid > 0.15.
 //! - Polymarket: **GTC** buy using Gamma **`orderMinSize`** + **`orderPriceMinTickSize`** (then cancel/replace).

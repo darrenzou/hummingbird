@@ -1,4 +1,8 @@
-//! Shared maker-loop helpers: cascade slots, periodic recalc, and volume / level IPC paths.
+//! Shared maker event loop used by both venues.
+//!
+//! [`maker_run`] waits for the taker book, places the cascade, then services
+//! WS + IPC: volume amends, level cancels, fills, and shutdown. Venue-specific
+//! REST lives behind [`MakerVenueOps`].
 
 use crate::arb_config::{now_ms, ArbCreds};
 use crate::arb_db::{log_db, ArbDb, KalshiCascadeOverlay};
@@ -843,6 +847,7 @@ pub trait MakerVenueOps: MakerAmendOps {
 }
 
 /// Shared outer maker loop for Kalshi-as-maker and Poly-as-maker children.
+/// Blocking maker loop: snapshot book → wait for cascade → rest orders → service WS/IPC.
 pub fn maker_run<O: MakerVenueOps>(
     ops: &mut O,
     fd_in: RawFd,

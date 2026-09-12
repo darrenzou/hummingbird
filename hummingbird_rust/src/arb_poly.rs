@@ -1,3 +1,9 @@
+//! Polymarket worker process.
+//!
+//! Default role is **taker**: maintain the CLOB book, build the cascade, hedge
+//! Kalshi fills from a pre-signed GTC pool, and idle-merge YES+NO.
+//! If `ARB_MAKER=polymarket`, this process instead runs the shared maker loop.
+
 use crate::arb_config::{now_ms, ArbCreds};
 use crate::arb_db::{log_db, ArbDb};
 use crate::arb_ipc;
@@ -1220,6 +1226,7 @@ fn poly_maker_process_run(fd_in: RawFd, fd_out: RawFd) -> anyhow::Result<()> {
     maker_run(&mut ops, fd_in, fd_out, &creds)
 }
 
+/// Child entry: taker by default, or maker when `ARB_MAKER=polymarket`.
 pub fn poly_process_run(fd_in: RawFd, fd_out: RawFd) -> anyhow::Result<()> {
     if crate::arb_config::env_maker_is_polymarket() {
         return poly_maker_process_run(fd_in, fd_out);
@@ -1227,6 +1234,7 @@ pub fn poly_process_run(fd_in: RawFd, fd_out: RawFd) -> anyhow::Result<()> {
     poly_taker_process_run(fd_in, fd_out)
 }
 
+/// Polymarket as taker: book + cascade + pre-signed hedge pool + idle merge.
 pub fn poly_taker_process_run(fd_in: RawFd, fd_out: RawFd) -> anyhow::Result<()> {
     if let Err(e) = shutdown::install_shutdown_handler() {
         eprintln!("[poly] shutdown handler install failed: {e:#}");

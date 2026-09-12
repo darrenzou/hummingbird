@@ -1,4 +1,4 @@
-//! Writes a **`setup_test`** marker into the arb database configured via `.env`
+//! Historical DB smoke test. Writes a `setup_test` marker into the configured database.
 //! (`DATABASE_URL` for Postgres, or `DB_HOST` / `DB_USER` / … for MySQL).
 //!
 //! Postgres: `events.event_type = 'setup_test'`, plus empty `kalshi_book` / `poly_book` rows.

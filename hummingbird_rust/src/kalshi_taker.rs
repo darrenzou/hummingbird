@@ -1,4 +1,7 @@
-//! Kalshi as taker (Polymarket maker). Mirrors `poly_taker_process_run` with Kalshi WS + FOK hedges.
+//! Kalshi-as-taker path (when Polymarket is the maker).
+//!
+//! Same IPC as [`crate::arb_poly::poly_taker_process_run`], but hedges with
+//! Kalshi fill-or-kill orders instead of a Polymarket pre-sign pool.
 
 use crate::arb_config::{now_ms, ArbCreds};
 use crate::arb_db::{log_db, ArbDb};
@@ -97,6 +100,7 @@ fn send_abort_fatal(fd_out: RawFd, code: &str, message: &str) {
     );
 }
 
+/// Kalshi as taker: stream book, size cascade, FOK-hedge maker fills.
 pub fn kalshi_taker_process_run(fd_in: RawFd, fd_out: RawFd) -> anyhow::Result<()> {
     if let Err(e) = shutdown::install_shutdown_handler() {
         eprintln!("[kalshi-taker] shutdown handler install failed: {e:#}");

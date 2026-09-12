@@ -1,4 +1,12 @@
-//! Cross-venue cascade and volume math (maker full book + taker book).
+//! Cascade sizing: how much to rest on the maker given the taker book.
+//!
+//! For each maker YES bid/ask rung, size is the min of:
+//! - half the maker size at that price
+//! - 75% of remaining taker depth beyond the edge
+//! - leftover per-side budget (`min(half portfolio, side_cap)`)
+//!
+//! A rung is skipped unless the maker limit sits at least [`EDGE_CENTS`] inside
+//! the taker best bid/ask. See [`build_cascade`].
 
 use crate::poly_live::round_poly_price;
 use crate::types::{
@@ -21,6 +29,7 @@ pub fn hedge_accum_apply(acc: &mut i32, maker_fill_side: Side, filled_count: u32
     }
 }
 
+/// Maker book + cash used by [`build_cascade`].
 #[derive(Debug, Clone, Default)]
 pub struct MakerState {
     pub yes_bids: Vec<PriceLevel>,

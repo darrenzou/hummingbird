@@ -1,3 +1,7 @@
+//! Local diagnostic page that renders both books and the current cascade.
+//!
+//! Historical helper (`cargo run --bin orderbook_web`). Not part of the live bot.
+
 use anyhow::Context;
 use hummingbird_rust::arb_config::{self, ArbConfig, MakerVenue};
 use hummingbird_rust::kalshi_live::KalshiLive;

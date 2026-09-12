@@ -1,3 +1,8 @@
+//! Polymarket CLOB client: public book, L2 HMAC REST, EIP-712 order signing, WS.
+//!
+//! Prices are stored as 0–1 dollars per outcome share and rounded to 3 decimals
+//! so float noise does not collapse bid/ask.
+
 use crate::arb_config::{now_ms, ArbCreds};
 use crate::types::{PolyFullBookPayload, PriceLevel};
 use base64::Engine;
@@ -278,6 +283,7 @@ pub const PLACE_ERR_RATE: i32 = 2;
 pub const PLACE_ERR_NETWORK: i32 = 3;
 pub const PLACE_ERR_OTHER: i32 = 4;
 
+/// Authenticated Polymarket session: CLOB REST, market WS, and order signing.
 pub struct PolyLive {
     address: String,
     funder_address: String,

@@ -1,3 +1,8 @@
+//! Length-prefixed bincode over a Unix pipe.
+//!
+//! Each message is `u32` little-endian length + payload. Bodies larger than 8 MiB
+//! are rejected. `dup` + `File` is used so `Read`/`Write` work on raw fds.
+
 use anyhow::Context;
 use serde::{de::DeserializeOwned, Serialize};
 use std::io::{Read, Write};

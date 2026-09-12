@@ -1,7 +1,16 @@
+//! IPC payloads shared by the Polymarket and Kalshi processes.
+//!
+//! Wire format is length-prefixed bincode ([`crate::arb_ipc`]). `IPC_VERSION` is 2.
+//! Maker-side prices are usually **integer cents**; taker books are **dollars per
+//! share** in 0–1 (Polymarket CLOB style).
+
 use serde::{Deserialize, Serialize};
 
+/// Max book levels kept in a snapshot.
 pub const ARB_MAX_LEVELS: usize = 64;
+/// Max cascade rungs tracked on each side.
 pub const ARB_MAX_TRACKED: usize = 32;
+/// Bumped when the `ArbMsg` layout changed from the original C structs.
 pub const IPC_VERSION: u8 = 2;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -16,6 +25,7 @@ pub enum Venue {
     Kalshi,
 }
 
+/// One book rung. Maker books use cents; taker books use 0–1 dollars.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
 pub struct PriceLevel {
     pub price: f64,
@@ -96,6 +106,7 @@ pub struct AbortFatalPayload {
     pub message: String,
 }
 
+/// One resting cascade rung the taker wants the maker to place.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CascadeOrder {
     pub level_price_cents: i16,
@@ -156,6 +167,15 @@ pub struct TouchCascadePivot {
     pub new_order: CascadeOrder,
 }
 
+/// Messages on the two pipes. Direction depends on who is maker vs taker.
+///
+/// Typical Kalshi-maker / Poly-taker flow:
+/// 1. Maker sends [`MakerBookSnapshot`] (and later deltas / fills).
+/// 2. Taker sends [`CascadeOrders`] after `strategy::build_cascade`.
+/// 3. Maker sends [`MakerLevelsDone`] once orders rest.
+/// 4. Taker sends [`LevelUpdate`] / [`TakerLevelVolUpdate`] when hedge-side depth moves.
+/// 5. Maker sends [`MakerFill`]; taker hedges.
+/// 6. Either side may send [`AbortFatal`] or [`Abort`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ArbMsg {
     MakerBookSnapshot(MakerBookSnapshot),
@@ -174,6 +194,7 @@ pub enum ArbMsg {
     MakerAbort { reason: String },
 }
 
-// Legacy names used in a few modules during migration.
+/// Older name kept so existing call sites compile. Same as [`TakerFullBookPayload`].
 pub type PolyFullBookPayload = TakerFullBookPayload;
+/// Older name kept so existing call sites compile. Same as [`TakerLevelVolUpdatePayload`].
 pub type PolyLevelVolUpdatePayload = TakerLevelVolUpdatePayload;

@@ -1,99 +1,108 @@
 # Hummingbird
 
-**Retired project.** Hummingbird was a Rust cross-exchange arbitrage bot for binary prediction markets on [Polymarket](https://polymarket.com) and [Kalshi](https://kalshi.com). It is published here as a previous project, not as something to run.
+Rust system for **cross-venue prediction-market arbitrage**: rest a cascade of limits on one exchange, hedge fills on the other, with signing and sizing kept off the fill path.
 
-Both venues later changed their API processes and trading rules. The integrations in this repo no longer work against current production APIs, and the bot is not maintained.
+**Retired.** Polymarket and Kalshi later changed APIs and rules. This repo is a design archive, not a live trader. Do not run it against production.
 
-This is a historical snapshot of the design and the Rust implementation. Do not point it at live credentials or expect it to place orders.
+It is meant to be read as a **low-latency backend**: isolated processes, a bounded IPC protocol, a single-threaded event loop per venue, and work that cannot happen in a fill window (EIP-712 signing, cascade math) done *before* the fill arrives.
 
-## What it did
+## Problem
 
-Polymarket and Kalshi both list binary YES/NO markets that resolve to the same event. Prices are quoted in cents. A spread exists when Polymarket buyers will pay more for YES than Kalshi’s best bid, and Polymarket sellers ask less than Kalshi’s best ask.
+Both venues list the same binary YES/NO event. Prices are in cents. A spread exists when Polymarket’s bid is above Kalshi’s bid and Polymarket’s ask is below Kalshi’s ask.
 
-Hummingbird captured that spread by:
+The latency problem is not “compute the spread.” It is: **a maker fill arrives over WebSocket; the hedge must already be signed and sized**, or the other book moves and the edge is gone. Polymarket CLOB orders are EIP-712 (secp256k1). Signing after the fill is too late.
 
-1. Resting limit orders on one venue (the **maker**, usually Kalshi).
-2. Pre-signing complementary hedge orders on the other venue (the **taker**, usually Polymarket).
-3. On a maker fill, immediately posting the pre-signed hedge so YES + NO locked in a small, bounded edge.
-
-Polymarket CLOB orders are EIP-712 signed (secp256k1). Signing after a fill would add latency, so the bot kept a pool of pre-signed GTC orders and refreshed them between fills.
-
-## How it worked
-
-Two child processes, one per venue, talked over length-prefixed IPC pipes. The parent forked both, ignored Ctrl+C, and waited for them to exit so each child could cancel resting orders on shutdown.
+## Design
 
 ```
-main
- ├── fork → Polymarket worker   (taker hedge + book + EIP-712 pool)
- └── fork → Kalshi worker       (maker book + cascade orders + fills)
-              ▲
-              └── Unix pipes, bincode messages (IPC v2)
+                    ┌─ pipe: books, fills, abort ─┐
+                    │     length-prefixed bincode │
+parent              ▼                             ▼
+ (fork, wait)    Kalshi worker                 Polymarket worker
+ SIGINT ignored  maker event loop              taker event loop
+ until children  WS + IPC poll                 WS + IPC poll
+ exit            rest / amend / cancel         cascade + hedge pool
+                 RSA-PSS REST                  EIP-712 pre-sign + HMAC L2
 ```
 
-Typical loop:
+Usual production shape: **Kalshi maker / Polymarket taker** (`maker` in config flips it).
 
-1. **Kalshi** connected over WebSocket, sent a maker book snapshot to Poly.
-2. **Poly** merged that book with its own CLOB book and ran `strategy::build_cascade`.
-3. Cascade levels were sized from overlapping depth, cash balances, and a per-side cap. Maker limits had to sit at least **2¢** inside the taker best bid/ask (`EDGE_CENTS`).
-4. **Kalshi** placed the cascade, reported live levels, and streamed fills.
-5. On a **10% / 15%** drop in taker volume behind a level, Poly sent amend/cancel updates so Kalshi could shrink or pull size without losing queue when possible.
-6. A Kalshi fill flipped hedge demand on Poly. The Poly worker submitted matching pre-signed orders (binary slot pool) and re-signed used slots after a short debounce.
-7. Offsetting YES+NO Polymarket positions could be merged back to USDC through the Conditional Tokens `mergePositions` path when a NO token id was configured.
+| Constraint | Choice | Why |
+|---|---|---|
+| Two venue APIs, two failure domains | `fork` — one process per venue, no shared heap | A WS stall or REST hang on one side cannot lock the other. Cleanup (cancel resting orders) stays local. |
+| Fill → hedge must not wait on crypto | Pre-signed GTC pool, binary slot sizes (`1, 2, 4, …`) | Cover a fill with `O(log n)` already-signed orders; re-sign used slots *after* a 2s debounce, not in the fill handler. |
+| Coordination without a shared lock | Unidirectional Unix pipes, `select` + length-prefixed bincode, 8 MiB cap | No mutex across venues. A bad peer cannot grow the receiver without bound. |
+| Hot path must be serial and cheap | One thread per worker: service WS, poll IPC, act | No lock convoys on book or slot state. The loop is the concurrency model. |
+| Do not rest size you cannot hedge | Cascade: 2¢ inside taker BBO, 75% of remaining depth, `side_cap` | Size is computed from *current* taker liquidity, not a static qty. |
+| Depth disappears under you | 10% / 15% taker-volume drop → amend or cancel | Shrink or pull before the hedge book is gone; prefer amend to keep queue. |
+| Exchange says stop | 429 → exponential backoff (max 8). Other 4xx/5xx → `AbortFatal` to peer | Retry only what is transient. Fatal errors tear both sides down together. |
+| Shutdown mid-book | Parent ignores SIGINT; children cancel, notify, then exit | Resting orders are not left on the venue because the supervisor died first. |
 
-Either side aborted if YES traded through **5¢ / 95¢**, on fatal HTTP errors, or on Ctrl+C. HTTP **429** was retried with backoff; other 4xx/5xx were treated as fatal and sent as `AbortFatal` to the peer.
+Parent does not trade. It loads config, applies pair 0 to the environment (children are separate address spaces after `fork`), opens two pipes, forks, and `waitpid`s.
 
-### Process layout
+## Hot path
 
-| Module | Role |
+When a Kalshi fill hits the maker WS:
+
+1. Maker sends `MakerFill` on the pipe (order id, side, cents, size).
+2. Taker decomposes `filled_count` into pre-signed slots and **POSTs them immediately**.
+3. Hedge demand is accumulated; a throttle fires a batch once `|pending|` exceeds a contract threshold so tiny fills do not spam the CLOB.
+4. Used slots are re-signed only after `RESIGN_DEBOUNCE_MS` (2s) with no new fill — idle work, not fill work.
+5. Optional: matched YES+NO on Polymarket is merged back to USDC on the same idle window (`poly_merge`).
+
+Cascade *placement* is also off the fill path: taker runs `strategy::build_cascade` when books update, maker batch-places, then both sit in the WS/IPC loop.
+
+Prices abort at 5¢ / 95¢ (market effectively resolved). Either worker can send `AbortFatal`; the peer cancels and exits.
+
+## Protocol
+
+`types::ArbMsg` (IPC v2). Typical Kalshi-maker / Poly-taker sequence:
+
+1. `MakerBookSnapshot` (+ later deltas)
+2. `CascadeOrders` — sized rungs + taker book
+3. `MakerLevelsDone` — resting ids / sizes
+4. `TakerLevelVolUpdate` / `LevelUpdate` — amend or cancel
+5. `MakerFill` → hedge
+6. `Abort` / `AbortFatal`
+
+Framing: `u32` LE length + bincode. Reject `len > 8 MiB` before allocating the body.
+
+## Code map
+
+Read `hummingbird_rust/src/lib.rs` first. Every file has a header.
+
+| File | Role |
 |---|---|
-| `src/main.rs` | Load config, fork Poly + Kalshi, wait |
-| `src/strategy.rs` | Cascade math, edge rule, hedge accumulator |
-| `src/maker_runtime.rs` | Shared maker event loop |
-| `src/arb_kalshi.rs` / `kalshi_live.rs` | Kalshi WS/REST, RSA-PSS auth, batch place/amend |
-| `src/arb_poly.rs` / `poly_live.rs` | Polymarket WS/REST, EIP-712 + HMAC L2 auth |
-| `src/poly_merge.rs` | Idle CTF merge of YES+NO back to USDC |
-| `src/arb_ipc.rs` | Length-prefixed bincode, 8 MB message cap |
-| `src/arb_db.rs` | Optional Postgres or MySQL event + book snapshots |
-| `src/error_policy.rs` | 429 retry vs fatal classification |
+| `main.rs` | Supervisor: config, `fork`, wait |
+| `strategy.rs` | Cascade math, 2¢ edge, hedge accumulator |
+| `types.rs` | IPC messages |
+| `maker_runtime.rs` | Shared maker loop (venue via traits) |
+| `arb_kalshi.rs` / `kalshi_live.rs` | Kalshi process, RSA-PSS, WS/REST |
+| `arb_poly.rs` / `poly_live.rs` | Poly process, EIP-712 pool, HMAC L2, WS/REST |
+| `kalshi_taker.rs` | Flipped mode: Kalshi hedges, Poly makes |
+| `poly_merge.rs` | Idle CTF `mergePositions` |
+| `arb_ipc.rs` | Pipes, length prefix, `select` |
+| `arb_db.rs` | Optional Postgres / MySQL snapshots (off hot path) |
+| `error_policy.rs` | 429 vs fatal |
+| `tests/` | Cascade, edge, amend, accumulator, JSON fixtures |
 
-Maker venue was configurable (`maker: "kalshi"` or `"polymarket"`). The Rust tree also had a Kalshi-as-taker path; the original production shape was Kalshi maker / Polymarket taker.
+`SYSTEM_PLAN.md` is the original language-neutral spec. Prefer the Rust sources if they disagree (IPC is v2 here).
 
-## Repository layout
+## What this is not
 
-```
-hummingbird_rust/          Rust crate (the bot)
-  src/                     library + `hummingbird_rust` binary
-  tests/                   cascade, amend, accumulator, fixture tests
-  setup_test/              old connectivity / DB write helpers
-  migrations/              Postgres schema reference
-SYSTEM_PLAN.md             original language-neutral design notes
-```
+Not a kernel-bypass / FPGA / colocated matching-engine stack. Venue RTT dominates. The design is about **not adding process, lock, or crypto latency on top of that RTT**, and about failing closed when a book or API is no longer trustworthy.
 
-The earlier C implementation was removed. This archive keeps only the Rust port.
+## Build (study only)
 
-## Status
-
-| | |
-|---|---|
-| **State** | Retired. Not maintained. |
-| **Why** | Polymarket and Kalshi API / regulatory changes made the live path obsolete. |
-| **Live trading** | Do not run this against production. Endpoints, auth, and market rules have moved on. |
-| **What remains useful** | Process split, IPC protocol, cascade sizing, fill-to-hedge flow, and the test fixtures. |
-
-`SYSTEM_PLAN.md` is the original spec. Some sections still describe the removed C tree or older IPC v1 messages. Prefer the Rust sources when the two disagree.
-
-## Build (historical)
-
-This crate targeted Linux/Unix (`fork`, pipes, `select`). It is left here so the code can be read and compiled for study, not operated.
+Linux/Unix (`fork`, pipes, `select`). For reading and tests, not operation.
 
 ```bash
 cd hummingbird_rust
 cargo test
-cargo build
 ```
 
-A `config.json` named markets and balances. Credentials came from a local `.env` (API keys, Ethereum key, Kalshi RSA PEM, optional `DATABASE_URL`). Those files are not in this repo.
+Credentials were local `.env` (not in this repo). `config.json` is a placeholder.
 
 ## License
 
-This repository is a personal project archive. There is no warranty. Use of exchange APIs is governed by those companies’ current terms; this code does not grant any right to trade on them.
+Personal archive. No warranty. Exchange terms govern any use of their APIs.

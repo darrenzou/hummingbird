@@ -3,6 +3,8 @@ name = "hummingbird_rust"
 version = "0.1.0"
 edition = "2021"
 default-run = "hummingbird_rust"
+description = "Retired Polymarket–Kalshi cross-exchange arb bot (historical archive)"
+publish = false
 
 [lib]
 name = "hummingbird_rust"

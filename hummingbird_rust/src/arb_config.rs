@@ -1,3 +1,8 @@
+//! `config.json` pairs and `.env` credentials.
+//!
+//! Config may be a wrapper object (`pairs` + balances), a raw pair array, or a
+//! single pair object. `neg_risk` accepts a bool or a number.
+
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::{env, fs};
@@ -189,7 +194,6 @@ pub fn load_config(path: &str) -> anyhow::Result<ArbConfig> {
     let raw = fs::read_to_string(path).with_context(|| format!("read {path}"))?;
     let root: serde_json::Value = serde_json::from_str(&raw).context("parse json")?;
 
-    // Support neg_risk as boolean or number (mirrors the C fix).
     let root = normalize_neg_risk(root);
 
     let parsed: ConfigRoot = serde_json::from_value(root).context("deserialize config")?;
@@ -254,7 +258,7 @@ pub fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
-/// `ARB_MAKER` (`kalshi` / `polymarket`) — when missing, treat Kalshi as maker (legacy default).
+/// `ARB_MAKER` (`kalshi` / `polymarket`). Missing or unknown → Kalshi is maker.
 pub fn env_maker_is_kalshi() -> bool {
     match env::var("ARB_MAKER") {
         Ok(v) => v.trim().eq_ignore_ascii_case("kalshi"),

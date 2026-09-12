@@ -1,3 +1,9 @@
+//! Kalshi worker process.
+//!
+//! Default role is **maker**: stream the book, place the cascade, amend/cancel
+//! on volume updates, and forward fills. If `ARB_MAKER=polymarket`, this
+//! process runs [`kalshi_taker`](crate::kalshi_taker) instead.
+
 use crate::arb_config::{now_ms, ArbCreds};
 use crate::arb_db::{log_db, ArbDb};
 use crate::error_policy;
@@ -506,6 +512,7 @@ fn merge_order_ids(orders: &[CascadeOrder], bid_ids: &[String], ask_ids: &[Strin
     out
 }
 
+/// Child entry: maker by default, or taker when `ARB_MAKER=polymarket`.
 pub fn kalshi_process_run(fd_in: RawFd, fd_out: RawFd) -> anyhow::Result<()> {
     if crate::arb_config::env_maker_is_polymarket() {
         return crate::kalshi_taker::kalshi_taker_process_run(fd_in, fd_out);

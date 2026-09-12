@@ -1,3 +1,8 @@
+//! Optional event + orderbook snapshot store (Postgres preferred, MySQL fallback).
+//!
+//! Used on fills, errors, and aborts so a run can be reconstructed later.
+//! Schema is created at connect time; see `migrations/postgres_init.sql`.
+
 use anyhow::Context;
 use mysql::prelude::*;
 use mysql::{Opts, OptsBuilder, Pool, PooledConn, SslOpts};

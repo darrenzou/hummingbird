@@ -1,3 +1,8 @@
+//! Kalshi trade API client: RSA-PSS REST, WS orderbook + fills.
+//!
+//! Books are kept in integer YES cents. The WS snapshot can arrive empty; in
+//! that case the public REST book is used once as a seed.
+
 use crate::arb_config::{now_ms, ArbCreds};
 use anyhow::Context;
 use base64::Engine;
@@ -55,6 +60,7 @@ struct PendingFill {
     order_id: String,
 }
 
+/// Authenticated Kalshi session: REST + market/user WS.
 pub struct KalshiLive {
     api_key_id: String,
     signing_key: SigningKey<Sha256>,
